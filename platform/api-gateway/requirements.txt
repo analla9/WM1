@@ -1,0 +1,9 @@
+fastapi==0.104.1
+uvicorn[standard]==0.23.2
+pydantic==2.4.2
+kafka-python==2.0.2
+psycopg2-binary==2.9.9 # For PostgreSQL
+SQLAlchemy==2.0.23    # ORM
+alembic==1.12.1       # For DB migrations (though not fully used in Phase 1)
+python-dotenv==1.0.0  # For environment variables
+hvac==1.2.1           # For HashiCorp Vault client

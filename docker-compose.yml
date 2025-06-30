@@ -1,0 +1,137 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:13
+    container_name: postgres_db
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: aicmp_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./iac/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - aicmp_network
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.0.1
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - aicmp_network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.0.1
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_CREATE_TOPICS: "tasks:1:1,discovery.resource.updates:1:1" # Added new topic
+    networks:
+      - aicmp_network
+
+  vault:
+    image: vault:1.9.0
+    container_name: vault
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: "root-token"
+      VAULT_ADDR: "http://127.0.0.1:8200"
+    cap_add:
+      - IPC_LOCK
+    networks:
+      - aicmp_network
+
+  api-gateway:
+    build:
+      context: ./platform/api-gateway
+    container_name: api_gateway_service
+    ports:
+      - "8000:8000"
+    depends_on:
+      - kafka
+      - postgres # Added dependency
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      DATABASE_URL: postgresql://admin:password@postgres_db:5432/aicmp_db
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: root-token
+    volumes:
+      - ./platform/api-gateway:/app # For live reloading in dev
+      # Mount shared models for api-gateway if needed, or install as package
+      - ./platform/shared:/app/platform/shared
+    networks:
+      - aicmp_network
+
+  orchestration-worker:
+    build:
+      context: ./platform/orchestration-worker
+    container_name: orchestration_worker_service
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: root-token
+    volumes:
+      - ./platform/orchestration-worker:/app # For live reloading in dev
+      # Mount shared models for orchestration worker if needed, or install as package
+      - ./platform/shared:/app/platform/shared
+    networks:
+      - aicmp_network
+
+  kvm-connector:
+    build:
+      context: ./platform/connectors/kvm-connector
+    container_name: kvm_connector_service
+    privileged: true # Often needed for full libvirt access, evaluate security implications
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      LIBVIRT_URI: qemu:///system # Ensure this matches your libvirt setup if not default
+      DISCOVERY_INTERVAL_SECONDS: 300 # Example: 5 minutes
+      PYTHONPATH: /app # To help find shared modules
+    volumes:
+      - /var/run/libvirt/libvirt-sock:/var/run/libvirt/libvirt-sock:ro # Mount libvirt socket (read-only is safer if possible)
+      - ./platform/connectors/kvm-connector:/app
+      - ./platform/shared:/app/platform/shared # Mount shared models
+    networks:
+      - aicmp_network
+
+  nginx:
+    image: nginx:latest
+    container_name: nginx_ingress
+    ports:
+      - "80:80"
+    volumes:
+      - ./iac/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api-gateway
+    networks:
+      - aicmp_network
+
+volumes:
+  postgres_data:
+
+networks:
+  aicmp_network:
+    driver: bridge

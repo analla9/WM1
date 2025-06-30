@@ -1,0 +1,8 @@
+libvirt-python==9.0.0  # Check for latest compatible version, this is an example
+kafka-python==2.0.2
+python-dotenv==1.0.0
+# FastAPI and Uvicorn are optional if no HTTP interface is needed for this service
+# but can be useful for health checks. For now, keeping it minimal as per brief.
+# fastapi==0.104.1
+# uvicorn[standard]==0.23.2
+schedule==1.2.0 # For scheduling the discovery task
