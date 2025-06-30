@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092").split(',')
 KAFKA_TASKS_TOPIC = "tasks"
 KAFKA_BLUEPRINT_DEPLOYMENT_TOPIC = "blueprint.deployment.requested"
+KAFKA_INCIDENTS_DETECTED_TOPIC = "incidents.detected" # Added for Phase 4
 
 
 # --- Pydantic Models ---
@@ -51,6 +52,22 @@ class BlueprintDeploymentRequest(BaseModel):
 class BlueprintDeploymentResponse(BaseModel):
     message: str
     blueprint_id: str # The ID from the path parameter
+    kafka_topic: str
+    kafka_offset: int | None = None
+
+# For Phase 4: Incident Test Endpoint
+class TestIncidentPayload(BaseModel):
+    incident_id: str = Field(default_factory=lambda: f"INC-TEST-{int(time.time())}")
+    title: str = "Test Incident: High Latency Detected"
+    description: str = "This is a test incident to trigger the RAG remediation workflow."
+    priority: Optional[str] = "P2"
+    affected_resources: List[Dict[str, Any]] = Field(default_factory=lambda: [{"type": "service", "id": "cart-service", "name": "ShoppingCartService"}])
+    telemetry_data: Optional[Dict[str, Any]] = Field(default_factory=lambda: {"latency_ms": 1500, "error_rate_percent": 5})
+    additional_context: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+class TestIncidentResponse(BaseModel):
+    message: str
+    incident_id: str
     kafka_topic: str
     kafka_offset: int | None = None
 
@@ -168,6 +185,42 @@ async def deploy_blueprint(blueprint_id: str, request_body: BlueprintDeploymentR
     except Exception as e:
         logger.error(f"An unexpected error occurred while submitting blueprint '{blueprint_id}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An unexpected error occurred during blueprint submission.")
+
+
+@app.post("/api/v1/incidents/test", response_model=TestIncidentResponse, status_code=202, tags=["Incidents"])
+async def submit_test_incident(payload: Optional[TestIncidentPayload] = Body(None)):
+    """
+    Submits a sample incident to the 'incidents.detected' Kafka topic.
+    This is used to test the remediation-service RAG workflow.
+    If no payload is provided, a default test incident is used.
+    """
+    if not producer:
+        logger.error("Kafka producer not available. Cannot submit test incident.")
+        raise HTTPException(status_code=503, detail="Incident processing service is temporarily unavailable.")
+
+    incident_payload = payload if payload else TestIncidentPayload()
+    # Ensure all fields are present as expected by RemediationService's IncidentPayload model
+    # The TestIncidentPayload model with defaults should handle this.
+
+    try:
+        logger.info(f"Received test incident submission: ID {incident_payload.incident_id}. Publishing to Kafka topic '{KAFKA_INCIDENTS_DETECTED_TOPIC}'.")
+        # The TestIncidentPayload model should be compatible with RemediationService's IncidentPayload
+        future = producer.send(KAFKA_INCIDENTS_DETECTED_TOPIC, value=incident_payload.dict(by_alias=True))
+        record_metadata = future.get(timeout=10)
+
+        logger.info(f"Test incident '{incident_payload.incident_id}' sent to Kafka. Offset: {record_metadata.offset}")
+        return TestIncidentResponse(
+            message="Test incident submitted successfully.",
+            incident_id=incident_payload.incident_id,
+            kafka_topic=KAFKA_INCIDENTS_DETECTED_TOPIC,
+            kafka_offset=record_metadata.offset
+        )
+    except KafkaError as e:
+        logger.error(f"Failed to send test incident '{incident_payload.incident_id}' to Kafka: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to submit test incident: {e}")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while submitting test incident '{incident_payload.incident_id}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An unexpected error occurred during test incident submission.")
 
 
 # --- Application Lifecycle (Optional for more complex setups) ---

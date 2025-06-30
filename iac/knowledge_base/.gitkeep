@@ -1,0 +1,42 @@
+# Placeholder for knowledge base markdown files.
+# Add .md files here, e.g., runbook_database_restart.md
+#
+# Example content for a runbook_database_restart.md:
+#
+# # Runbook: Database Restart Procedure
+#
+# ## Symptoms
+# - Application reporting "Cannot connect to database".
+# - Database monitoring shows high latency or no response.
+#
+# ## Affected Systems
+# - Primary PostgreSQL Database (db-prod-01)
+# - Dependent application services (Order Service, Inventory Service)
+#
+# ## Pre-checks
+# 1. Verify network connectivity to the database server.
+#    `ping db-prod-01`
+# 2. Check current database process status on the host.
+#    `ssh admin@db-prod-01 "sudo systemctl status postgresql"`
+#
+# ## Restart Steps
+# 1. Notify stakeholders of planned brief outage. (Communication Channel: #ops-alerts)
+# 2. Gracefully stop application services connecting to the database.
+#    - `kubectl scale deployment order-service --replicas=0`
+#    - `kubectl scale deployment inventory-service --replicas=0`
+# 3. Attempt a graceful restart of the PostgreSQL service.
+#    `ssh admin@db-prod-01 "sudo systemctl restart postgresql"`
+# 4. Verify PostgreSQL service is running and accepting connections.
+#    `ssh admin@db-prod-01 "sudo systemctl status postgresql"`
+#    `ssh admin@db-prod-01 "psql -c 'SELECT 1;'"`
+# 5. If graceful restart fails, investigate logs: `/var/log/postgresql/postgresql-XX-main.log`
+# 6. Restore application services.
+#    - `kubectl scale deployment order-service --replicas=3`
+#    - `kubectl scale deployment inventory-service --replicas=3`
+# 7. Monitor application health and database performance post-restart.
+#
+# ## Escalation
+# If restart does not resolve the issue, escalate to Database Admin Team Lead (@db-lead).
+#
+# ## Tags
+# postgresql, database, restart, outage, troubleshooting
