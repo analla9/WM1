@@ -43,9 +43,36 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_CREATE_TOPICS: "tasks:1:1,discovery.resource.updates:1:1,blueprint.deployment.requested:1:1" # Added Phase 3 topic
+      KAFKA_CREATE_TOPICS: "tasks:1:1,discovery.resource.updates:1:1,blueprint.deployment.requested:1:1,incidents.detected:1:1" # Added Phase 4 topic
     networks:
       - aicmp_network
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0 # Use a specific recent version
+    container_name: elasticsearch_db
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m # Development settings, adjust for production
+      - xpack.security.enabled=false # Disable security for local dev simplicity
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - aicmp_network
+
+  chromadb:
+    image: chromadb/chroma:0.4.22 # Use a specific recent version
+    container_name: chroma_db
+    ports:
+      - "8003:8000" # Chroma runs on port 8000 in container, expose on host 8003 to avoid conflict with other services
+    volumes:
+      - chroma_data:/chroma/chroma # Persist Chroma data
+    networks:
+      - aicmp_network
+    # For more advanced Chroma settings, you might need a chroma_config.yaml
+    # and mount it, then adjust the command. For now, defaults are fine.
 
   vault:
     image: vault:1.9.0
@@ -189,6 +216,8 @@ services:
 
 volumes:
   postgres_data:
+  elasticsearch_data: # Added volume for Elasticsearch
+  chroma_data:        # Added volume for ChromaDB
 
 networks:
   aicmp_network:

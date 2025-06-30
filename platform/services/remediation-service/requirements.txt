@@ -1,0 +1,11 @@
+fastapi==0.104.1
+uvicorn[standard]==0.23.2
+pydantic==2.4.2
+python-dotenv==1.0.0
+kafka-python==2.0.2
+elasticsearch==8.11.0
+chromadb-client==0.4.22
+sentence-transformers==2.2.2 # For generating query embeddings
+httpx==0.25.0 # For potential actual LLM calls in future
+# tiktoken might be useful here too if complex prompt engineering is done before sending to LLM
+tiktoken==0.5.1

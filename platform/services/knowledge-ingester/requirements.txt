@@ -1,0 +1,11 @@
+fastapi==0.104.1
+uvicorn[standard]==0.23.2
+pydantic==2.4.2
+python-dotenv==1.0.0
+watchdog==3.0.0
+elasticsearch==8.11.0 # Match ES version in docker-compose
+chromadb-client==0.4.22 # Match ChromaDB version if possible, or ensure compatibility
+sentence-transformers==2.2.2 # For all-MiniLM-L6-v2
+markdown==3.5.1
+tiktoken==0.5.1 # For more advanced text splitting/chunking
+lxml==4.9.3 # Often a useful parser for HTML/XML content if markdown contains it, or for general text cleaning. Good to have.
