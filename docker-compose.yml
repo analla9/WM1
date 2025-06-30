@@ -43,7 +43,7 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_CREATE_TOPICS: "tasks:1:1,discovery.resource.updates:1:1" # Added new topic
+      KAFKA_CREATE_TOPICS: "tasks:1:1,discovery.resource.updates:1:1,blueprint.deployment.requested:1:1" # Added Phase 3 topic
     networks:
       - aicmp_network
 
@@ -87,14 +87,18 @@ services:
     container_name: orchestration_worker_service
     depends_on:
       - kafka
+      - blueprint-service # Added dependency for Phase 3
+      - governance-engine # Added dependency for Phase 3
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      VAULT_ADDR: http://vault:8200
-      VAULT_TOKEN: root-token
+      VAULT_ADDR: http://vault:8200 # Not used in Phase 3 logic yet, but keep for consistency
+      VAULT_TOKEN: root-token # Not used in Phase 3 logic yet
+      PYTHONPATH: /app # Ensure this is set for shared models
+      BLUEPRINT_SERVICE_URL: http://blueprint-service:8000 # For Orchestration Worker to call
+      GOVERNANCE_ENGINE_URL: http://governance-engine:8000 # For Orchestration Worker to call
     volumes:
       - ./platform/orchestration-worker:/app # For live reloading in dev
-      # Mount shared models for orchestration worker if needed, or install as package
-      - ./platform/shared:/app/platform/shared
+      - ./platform/shared:/app/platform/shared # Mount shared models
     networks:
       - aicmp_network
 
@@ -114,6 +118,60 @@ services:
       - /var/run/libvirt/libvirt-sock:/var/run/libvirt/libvirt-sock:ro # Mount libvirt socket (read-only is safer if possible)
       - ./platform/connectors/kvm-connector:/app
       - ./platform/shared:/app/platform/shared # Mount shared models
+    networks:
+      - aicmp_network
+
+  blueprint-service:
+    build:
+      context: ./platform/services/blueprint-service
+    container_name: blueprint_service
+    ports:
+      - "8001:8000" # Expose on host port 8001, container port 8000
+    depends_on:
+      - kafka # Not strictly needed for parsing, but good practice if it ever needs to produce/consume
+    environment:
+      PYTHONPATH: /app
+    volumes:
+      - ./platform/services/blueprint-service:/app
+      - ./platform/shared:/app/platform/shared # If it needs shared models
+    networks:
+      - aicmp_network
+
+  opa:
+    image: openpolicyagent/opa:latest-debug # Using debug image for easier troubleshooting
+    container_name: opa_server
+    ports:
+      - "8181:8181"
+    command:
+      - "run"
+      - "--server"
+      - "--log-level=debug" # More verbose logging from OPA
+      # - "--set=decision_logs.console=true" # To see OPA decision logs in container logs
+      - "/policies" # Load all .rego files from /policies directory
+      # Alternatively, use a config file for more complex setups:
+      # - "--config-file=/config/opa-config.yaml"
+    volumes:
+      - ./iac/policies:/policies:ro # Mount Rego policies read-only
+      # - ./iac/opa-config.yaml:/config/opa-config.yaml:ro # If using a config file
+    networks:
+      - aicmp_network
+
+  governance-engine:
+    build:
+      context: ./platform/services/governance-engine
+    container_name: governance_engine_service
+    ports:
+      - "8002:8000" # Expose on host port 8002
+    depends_on:
+      - opa # Depends on OPA server being available
+      - kafka # Not strictly needed for evaluation, but good practice
+    environment:
+      PYTHONPATH: /app
+      OPA_URL: http://opa:8181
+      OPA_DECISION_PATH: "/v1/data/system/main/violations" # Ensure this matches your Rego package and rule
+    volumes:
+      - ./platform/services/governance-engine:/app
+      - ./platform/shared:/app/platform/shared # If it needs shared models
     networks:
       - aicmp_network
 
