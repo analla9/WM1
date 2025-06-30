@@ -17,8 +17,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- Configuration ---
-KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092").split(',')
 KAFKA_TASKS_TOPIC = "tasks"
+KAFKA_BLUEPRINT_DEPLOYMENT_TOPIC = "blueprint.deployment.requested"
+
 
 # --- Pydantic Models ---
 class HealthResponse(BaseModel):
@@ -41,6 +43,17 @@ class JobSubmissionResponse(BaseModel):
     message: str
     job_id: str
     kafka_offset: int | None = None # Store offset if successfully sent
+
+class BlueprintDeploymentRequest(BaseModel):
+    blueprint_yaml: str # Expecting raw YAML string in the request body
+    # Could also accept a JSON representation of the blueprint and convert to YAML here if preferred
+
+class BlueprintDeploymentResponse(BaseModel):
+    message: str
+    blueprint_id: str # The ID from the path parameter
+    kafka_topic: str
+    kafka_offset: int | None = None
+
 
 # --- Kafka Producer ---
 # It's better to initialize the producer globally if the app is not expected to fork,
@@ -119,6 +132,43 @@ async def submit_job(payload: JobPayload):
     except Exception as e:
         logger.error(f"An unexpected error occurred while submitting job '{payload.job_id}': {e}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred.")
+
+
+@app.post("/api/v1/blueprints/{blueprint_id}/deploy", response_model=BlueprintDeploymentResponse, status_code=202, tags=["Blueprints"])
+async def deploy_blueprint(blueprint_id: str, request_body: BlueprintDeploymentRequest):
+    """
+    Submits a blueprint deployment request to the orchestration tier via Kafka.
+    The raw blueprint YAML is published to the 'blueprint.deployment.requested' Kafka topic.
+    """
+    if not producer:
+        logger.error("Kafka producer not available. Cannot submit blueprint deployment.")
+        raise HTTPException(status_code=503, detail="Blueprint deployment service is temporarily unavailable.")
+
+    # The message to Kafka will include the blueprint_id from the path and the YAML from the body
+    message_payload = {
+        "blueprint_id": blueprint_id,
+        "blueprint_yaml": request_body.blueprint_yaml
+    }
+
+    try:
+        logger.info(f"Received blueprint deployment request for ID '{blueprint_id}'. Publishing to Kafka topic '{KAFKA_BLUEPRINT_DEPLOYMENT_TOPIC}'.")
+        future = producer.send(KAFKA_BLUEPRINT_DEPLOYMENT_TOPIC, value=message_payload)
+        record_metadata = future.get(timeout=10) # Synchronous send for simplicity
+
+        logger.info(f"Blueprint deployment request for '{blueprint_id}' sent to Kafka. Offset: {record_metadata.offset}")
+        return BlueprintDeploymentResponse(
+            message="Blueprint deployment request submitted successfully.",
+            blueprint_id=blueprint_id,
+            kafka_topic=KAFKA_BLUEPRINT_DEPLOYMENT_TOPIC,
+            kafka_offset=record_metadata.offset
+        )
+    except KafkaError as e:
+        logger.error(f"Failed to send blueprint deployment request for '{blueprint_id}' to Kafka: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to submit blueprint for processing: {e}")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while submitting blueprint '{blueprint_id}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An unexpected error occurred during blueprint submission.")
+
 
 # --- Application Lifecycle (Optional for more complex setups) ---
 @app.on_event("startup")
