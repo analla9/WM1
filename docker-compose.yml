@@ -1,0 +1,243 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:13
+    container_name: postgres_db
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: aicmp_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./iac/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - aicmp_network
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.0.1
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - aicmp_network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.0.1
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_CREATE_TOPICS: "tasks:1:1,discovery.resource.updates:1:1,blueprint.deployment.requested:1:1,incidents.detected:1:1" # Added Phase 4 topic
+    networks:
+      - aicmp_network
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0 # Use a specific recent version
+    container_name: elasticsearch_db
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m # Development settings, adjust for production
+      - xpack.security.enabled=false # Disable security for local dev simplicity
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - aicmp_network
+
+  chromadb:
+    image: chromadb/chroma:0.4.22 # Use a specific recent version
+    container_name: chroma_db
+    ports:
+      - "8003:8000" # Chroma runs on port 8000 in container, expose on host 8003 to avoid conflict with other services
+    volumes:
+      - chroma_data:/chroma/chroma # Persist Chroma data
+    networks:
+      - aicmp_network
+    # For more advanced Chroma settings, you might need a chroma_config.yaml
+    # and mount it, then adjust the command. For now, defaults are fine.
+
+  vault:
+    image: vault:1.9.0
+    container_name: vault
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: "root-token"
+      VAULT_ADDR: "http://127.0.0.1:8200"
+    cap_add:
+      - IPC_LOCK
+    networks:
+      - aicmp_network
+
+  api-gateway:
+    build:
+      context: ./platform/api-gateway
+    container_name: api_gateway_service
+    ports:
+      - "8000:8000"
+    depends_on:
+      - kafka
+      - postgres # Added dependency
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      DATABASE_URL: postgresql://admin:password@postgres_db:5432/aicmp_db
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: root-token
+    volumes:
+      - ./platform/api-gateway:/app # For live reloading in dev
+      # Mount shared models for api-gateway if needed, or install as package
+      - ./platform/shared:/app/platform/shared
+    networks:
+      - aicmp_network
+
+  orchestration-worker:
+    build:
+      context: ./platform/orchestration-worker
+    container_name: orchestration_worker_service
+    depends_on:
+      - kafka
+      - blueprint-service # Added dependency for Phase 3
+      - governance-engine # Added dependency for Phase 3
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      VAULT_ADDR: http://vault:8200 # Not used in Phase 3 logic yet, but keep for consistency
+      VAULT_TOKEN: root-token # Not used in Phase 3 logic yet
+      PYTHONPATH: /app # Ensure this is set for shared models
+      BLUEPRINT_SERVICE_URL: http://blueprint-service:8000 # For Orchestration Worker to call
+      GOVERNANCE_ENGINE_URL: http://governance-engine:8000 # For Orchestration Worker to call
+    volumes:
+      - ./platform/orchestration-worker:/app # For live reloading in dev
+      - ./platform/shared:/app/platform/shared # Mount shared models
+    networks:
+      - aicmp_network
+
+  kvm-connector:
+    build:
+      context: ./platform/connectors/kvm-connector
+    container_name: kvm_connector_service
+    privileged: true # Often needed for full libvirt access, evaluate security implications
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      LIBVIRT_URI: qemu:///system # Ensure this matches your libvirt setup if not default
+      DISCOVERY_INTERVAL_SECONDS: 300 # Example: 5 minutes
+      PYTHONPATH: /app # To help find shared modules
+    volumes:
+      - /var/run/libvirt/libvirt-sock:/var/run/libvirt/libvirt-sock:ro # Mount libvirt socket (read-only is safer if possible)
+      - ./platform/connectors/kvm-connector:/app
+      - ./platform/shared:/app/platform/shared # Mount shared models
+    networks:
+      - aicmp_network
+
+  blueprint-service:
+    build:
+      context: ./platform/services/blueprint-service
+    container_name: blueprint_service
+    ports:
+      - "8001:8000" # Expose on host port 8001, container port 8000
+    depends_on:
+      - kafka # Not strictly needed for parsing, but good practice if it ever needs to produce/consume
+    environment:
+      PYTHONPATH: /app
+    volumes:
+      - ./platform/services/blueprint-service:/app
+      - ./platform/shared:/app/platform/shared # If it needs shared models
+    networks:
+      - aicmp_network
+
+  opa:
+    image: openpolicyagent/opa:latest-debug # Using debug image for easier troubleshooting
+    container_name: opa_server
+    ports:
+      - "8181:8181"
+    command:
+      - "run"
+      - "--server"
+      - "--log-level=debug" # More verbose logging from OPA
+      # - "--set=decision_logs.console=true" # To see OPA decision logs in container logs
+      - "/policies" # Load all .rego files from /policies directory
+      # Alternatively, use a config file for more complex setups:
+      # - "--config-file=/config/opa-config.yaml"
+    volumes:
+      - ./iac/policies:/policies:ro # Mount Rego policies read-only
+      # - ./iac/opa-config.yaml:/config/opa-config.yaml:ro # If using a config file
+    networks:
+      - aicmp_network
+
+  governance-engine:
+    build:
+      context: ./platform/services/governance-engine
+    container_name: governance_engine_service
+    ports:
+      - "8002:8000" # Expose on host port 8002
+    depends_on:
+      - opa # Depends on OPA server being available
+      - kafka # Not strictly needed for evaluation, but good practice
+    environment:
+      PYTHONPATH: /app
+      OPA_URL: http://opa:8181
+      OPA_DECISION_PATH: "/v1/data/system/main/violations" # Ensure this matches your Rego package and rule
+    volumes:
+      - ./platform/services/governance-engine:/app
+      - ./platform/shared:/app/platform/shared # If it needs shared models
+    networks:
+      - aicmp_network
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: frontend_app
+    ports:
+      - "3000:80" # Expose frontend's Nginx (serving static files) on host port 3000
+    depends_on:
+      - api-gateway # Technically, nginx proxies, but good to show intent if it ever called API directly
+    environment:
+      # Environment variables for React app can be set here if needed at runtime by Nginx
+      # For build-time variables, use .env files in /frontend or ARGs in frontend/Dockerfile
+      NODE_ENV: development # Or production, depending on how build is handled
+    # volumes:
+      # - ./frontend:/app # For development with live reloading if Node server is used instead of Nginx build
+      # - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro # If using a specific Nginx config for this service
+    networks:
+      - aicmp_network
+
+  nginx: # This is the main ingress Nginx
+    image: nginx:latest
+    container_name: nginx_ingress
+    ports:
+      - "80:80" # Main entry point for users
+    volumes:
+      - ./iac/nginx.conf:/etc/nginx/nginx.conf:ro # Main Nginx config
+    depends_on:
+      - api-gateway
+      - frontend # Main Nginx needs to know about the frontend service to proxy to it
+    networks:
+      - aicmp_network
+
+volumes:
+  postgres_data:
+  elasticsearch_data: # Added volume for Elasticsearch
+  chroma_data:        # Added volume for ChromaDB
+
+networks:
+  aicmp_network:
+    driver: bridge
