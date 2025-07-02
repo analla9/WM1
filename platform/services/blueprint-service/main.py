@@ -4,7 +4,7 @@ from pydantic import ValidationError
 import logging
 
 # Assuming models.py is in the same directory
-from .models import Blueprint
+from models import Blueprint
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
