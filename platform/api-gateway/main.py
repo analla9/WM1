@@ -226,13 +226,14 @@ async def submit_test_incident(payload: Optional[TestIncidentPayload] = Body(Non
 # --- Application Lifecycle (Optional for more complex setups) ---
 @app.on_event("startup")
 async def startup_event():
+    global producer # Must be the first line in the function if 'producer' is modified
     logger.info("API Gateway starting up...")
     # Initialize database connections, Vault client, etc. here if needed
     # For Kafka producer, it's already initialized globally, but could be done here
     # if a more complex lifecycle management is required.
     if producer is None: # Attempt re-connect if initial connection failed
         try:
-            global producer
+            # global producer # No longer needed here as it's at the top of the function
             producer = KafkaProducer(
                 bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
                 value_serializer=lambda v: json.dumps(v).encode('utf-8'),

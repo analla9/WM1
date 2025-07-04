@@ -44,6 +44,11 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_CREATE_TOPICS: "tasks:1:1,discovery.resource.updates:1:1,blueprint.deployment.requested:1:1,incidents.detected:1:1" # Added Phase 4 topic
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list || exit 1"] # Added || exit 1 to ensure non-zero exit on failure
+      interval: 15s
+      timeout: 10s
+      retries: 5
     networks:
       - aicmp_network
 
@@ -63,7 +68,7 @@ services:
       - aicmp_network
 
   chromadb:
-    image: chromadb/chroma:0.4.22 # Use a specific recent version
+    image: ghcr.io/chroma-core/chroma:0.4.24 # Pinned to specific known-stable version
     container_name: chroma_db
     ports:
       - "8003:8000" # Chroma runs on port 8000 in container, expose on host 8003 to avoid conflict with other services
@@ -73,6 +78,57 @@ services:
       - aicmp_network
     # For more advanced Chroma settings, you might need a chroma_config.yaml
     # and mount it, then adjust the command. For now, defaults are fine.
+
+  knowledge-ingester:
+    build:
+      context: ./platform/services/knowledge-ingester
+    container_name: knowledge_ingester_service
+    depends_on:
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_started # Assuming ES starts or use its own healthcheck
+      chromadb:
+        condition: service_started # Assuming Chroma starts or use its own healthcheck
+    environment:
+      PYTHONPATH: /app
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: 8000 # Internal Chroma port
+      KNOWLEDGE_BASE_DIR: /iac_mounted/knowledge_base # Path inside container
+    volumes:
+      - ./platform/services/knowledge-ingester:/app
+      - ./platform/shared:/app/platform/shared
+      - ./iac/knowledge_base:/iac_mounted/knowledge_base:ro # Mount KB read-only
+    networks:
+      - aicmp_network
+
+  remediation-service:
+    build:
+      context: ./platform/services/remediation-service
+    container_name: remediation_service
+    ports:
+      - "8004:8000" # Expose on host port 8004
+    depends_on:
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_started # Or add specific healthcheck for ES
+      chromadb:
+        condition: service_started # Or add specific healthcheck for Chroma
+    environment:
+      PYTHONPATH: /app
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: 8000 # Internal Chroma port
+      # LLM_API_URL, LLM_API_KEY, LLM_MODEL_NAME can be set here if needed
+    volumes:
+      - ./platform/services/remediation-service:/app
+      - ./platform/shared:/app/platform/shared
+    networks:
+      - aicmp_network
 
   vault:
     image: vault:1.9.0
@@ -94,8 +150,10 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - kafka
-      - postgres # Added dependency
+      kafka:
+        condition: service_healthy
+      postgres: # Assuming postgres starts relatively quickly, or add healthcheck too
+        condition: service_started
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       DATABASE_URL: postgresql://admin:password@postgres_db:5432/aicmp_db
@@ -111,11 +169,14 @@ services:
   orchestration-worker:
     build:
       context: ./platform/orchestration-worker
-    container_name: orchestration_worker_service
+    container_name: orchestration_worker_service # Corrected service name from prompt
     depends_on:
-      - kafka
-      - blueprint-service # Added dependency for Phase 3
-      - governance-engine # Added dependency for Phase 3
+      kafka: # Updated to wait for Kafka healthcheck
+        condition: service_healthy
+      blueprint-service:
+        condition: service_started # Assuming this service starts relatively quickly
+      governance-engine:
+        condition: service_started # Assuming this service starts relatively quickly
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       VAULT_ADDR: http://vault:8200 # Not used in Phase 3 logic yet, but keep for consistency
@@ -135,7 +196,8 @@ services:
     container_name: kvm_connector_service
     privileged: true # Often needed for full libvirt access, evaluate security implications
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       LIBVIRT_URI: qemu:///system # Ensure this matches your libvirt setup if not default
@@ -202,15 +264,34 @@ services:
     networks:
       - aicmp_network
 
-  nginx:
+  frontend:
+    build:
+      context: ./frontend
+    container_name: frontend_app
+    ports:
+      - "3000:80" # Expose frontend's Nginx (serving static files) on host port 3000
+    depends_on:
+      - api-gateway # Technically, nginx proxies, but good to show intent if it ever called API directly
+    environment:
+      # Environment variables for React app can be set here if needed at runtime by Nginx
+      # For build-time variables, use .env files in /frontend or ARGs in frontend/Dockerfile
+      NODE_ENV: development # Or production, depending on how build is handled
+    # volumes:
+      # - ./frontend:/app # For development with live reloading if Node server is used instead of Nginx build
+      # - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro # If using a specific Nginx config for this service
+    networks:
+      - aicmp_network
+
+  nginx: # This is the main ingress Nginx
     image: nginx:latest
     container_name: nginx_ingress
     ports:
-      - "80:80"
+      - "80:80" # Main entry point for users
     volumes:
-      - ./iac/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./iac/nginx.conf:/etc/nginx/nginx.conf:ro # Main Nginx config
     depends_on:
       - api-gateway
+      - frontend # Main Nginx needs to know about the frontend service to proxy to it
     networks:
       - aicmp_network
 
