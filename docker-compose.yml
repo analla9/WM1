@@ -44,6 +44,12 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_CREATE_TOPICS: "tasks:1:1,discovery.resource.updates:1:1,blueprint.deployment.requested:1:1,incidents.detected:1:1" # Added Phase 4 topic
+
+      healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - aicmp_network
 
@@ -94,8 +100,12 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - kafka
-      - postgres # Added dependency
+  kafka:
+    condition: service_healthy
+  blueprint-service:
+    condition: service_started
+  governance-engine:
+    condition: service_started
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       DATABASE_URL: postgresql://admin:password@postgres_db:5432/aicmp_db
